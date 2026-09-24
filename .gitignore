@@ -1,0 +1,10 @@
+# .gitignore
+sEMG_data/
+*.csv
+*.zip
+code.ipynb
+CLAUDE.md
+.env
+/docs/superpowers
+__pycache__/
+.pytest_cache/
