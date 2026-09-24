@@ -5,6 +5,7 @@ Model: x[n] = -sum_{k=1..p} a_k[n] x[n-k] + e[n],  e[n] ~ N(0, sigma2[n]).
 import math
 
 import numpy as np
+from numba import njit
 
 from .io import FS
 from .metrics import BAND, mnf
@@ -69,3 +70,60 @@ def select_order(x, fs=FS, p_range=range(2, 31), p_ref=40, tol_hz=1.0,
         ref = fit_mnf(seg, p_ref)
         best.append(next((p for p in p_range if abs(fit_mnf(seg, p) - ref) <= tol_hz), p_range[-1]))
     return int(np.median(best))
+
+# ---------------------------------------------------------------- numba kernels
+
+@njit(cache=True)
+def _regressor(x, n, p):
+    h = np.empty(p)
+    for k in range(p):
+        h[k] = -x[n - 1 - k]
+    return h
+
+
+@njit(cache=True)
+def _rls_kernel(x, p, lam, delta, alpha, stride):
+    N = x.size
+    n_out = (N - 1 - p) // stride + 1
+    A = np.zeros((n_out, p))
+    S2 = np.zeros(n_out)
+    theta = np.zeros(p)
+    P = delta * np.eye(p)
+    s2 = 1.0
+    for n in range(p, N):
+        h = _regressor(x, n, p)
+        Ph = P @ h
+        g = Ph / (lam + h @ Ph)
+        e = x[n] - h @ theta
+        theta += g * e
+        P = (P - np.outer(g, Ph)) / lam
+        P = 0.5 * (P + P.T)
+        s2 = alpha * s2 + (1.0 - alpha) * e * e
+        j = n - p
+        if j % stride == 0:
+            A[j // stride] = theta
+            S2[j // stride] = s2
+    return A, S2
+
+
+# ---------------------------------------------------------------- estimators
+
+def _stride(fs, out_dt):
+    return max(1, int(round(out_dt * fs)))
+
+
+def _out_times(n_out, p, stride, fs):
+    return (p + stride * np.arange(n_out)) / fs
+
+
+def tvar_rls(x, p, tau, fs=FS, out_dt=0.05, r_tau=1.0, delta=100.0):
+    """Exponentially weighted RLS TVAR. `tau` is the memory in seconds (lambda = exp(-1/(tau*fs))).
+
+    Returns (t_out (T,), A (T, p), sigma2 (T,)), times relative to the first sample.
+    """
+    x = np.ascontiguousarray(x, dtype=np.float64)
+    stride = _stride(fs, out_dt)
+    lam = math.exp(-1.0 / (tau * fs))
+    alpha = math.exp(-1.0 / (r_tau * fs))
+    A, S2 = _rls_kernel(x, p, lam, delta, alpha, stride)
+    return _out_times(len(A), p, stride, fs), A, S2
