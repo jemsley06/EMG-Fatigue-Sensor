@@ -8,7 +8,8 @@ import numpy as np
 from numba import njit
 
 from .io import FS
-from .metrics import BAND, mnf
+from .metrics import BAND, SpectralTrack, mdf, mnf
+from .preprocess import bandpass, standardize
 
 FREQ_GRID = np.arange(BAND[0], BAND[1] + 1.0, 1.0)   # 1 Hz grid over the 20-450 Hz analysis band
 
@@ -217,3 +218,27 @@ def tvar_kalman(x, p, q, r=None, fs=FS, out_dt=0.05, r_tau=1.0, p0=10.0, checkpo
         r0, alpha = float(r), 1.0
     A, S2 = _kalman_kernel(x, p, q, p0, r0, alpha, stride, checkpoint, smooth)
     return _out_times(len(A), p, stride, fs), A, S2
+
+# ---------------------------------------------------------------- pipeline
+
+def run_tvar(trial, method, p, discard_s=1.0, keep_psd=False, **params):
+    """bandpass -> standardize -> TVAR -> AR PSD (20-450 Hz, 1 Hz grid) -> MNF/MDF.
+
+    `params` go to the estimator (`q`/`r` for "kalman", `tau` for "rls"). The first `discard_s`
+    seconds (estimator start-up) are dropped. Returned times are in the trial's own clock.
+    """
+    x = standardize(bandpass(trial.x, trial.fs))
+    if method == "kalman":
+        t, A, s2 = tvar_kalman(x, p, fs=trial.fs, **params)
+    elif method == "rls":
+        t, A, s2 = tvar_rls(x, p, fs=trial.fs, **params)
+    else:
+        raise ValueError(f"method must be 'kalman' or 'rls', got {method!r}")
+    keep = t >= discard_s
+    t, A, s2 = t[keep], A[keep], s2[keep]
+    psd = ar_psd(A, s2, trial.fs, FREQ_GRID)
+    return SpectralTrack(
+        t=trial.t[0] + t, mnf=mnf(psd, FREQ_GRID), mdf=mdf(psd, FREQ_GRID),
+        method=f"tvar_{method}", params={"p": p, **params},
+        psd=psd if keep_psd else None, f=FREQ_GRID if keep_psd else None,
+    )
