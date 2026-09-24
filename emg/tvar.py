@@ -127,3 +127,93 @@ def tvar_rls(x, p, tau, fs=FS, out_dt=0.05, r_tau=1.0, delta=100.0):
     alpha = math.exp(-1.0 / (r_tau * fs))
     A, S2 = _rls_kernel(x, p, lam, delta, alpha, stride)
     return _out_times(len(A), p, stride, fs), A, S2
+
+# ---------------------------------------------------------------- Kalman TVAR
+
+@njit(cache=True)
+def _kf_update(x, n, p, q, theta, P, r, alpha):
+    """One random-walk Kalman step, in place on theta/P. Returns the updated noise estimate r."""
+    for i in range(p):
+        P[i, i] += q
+    h = _regressor(x, n, p)
+    Ph = P @ h
+    e = x[n] - h @ theta
+    K = Ph / (h @ Ph + r)
+    theta += K * e
+    P -= np.outer(K, Ph)
+    P[:, :] = 0.5 * (P + P.T)
+    return alpha * r + (1.0 - alpha) * e * e
+
+
+@njit(cache=True)
+def _kalman_kernel(x, p, q, p0, r0, alpha, stride, M, smooth):
+    N = x.size
+    n_out = (N - 1 - p) // stride + 1
+    A = np.zeros((n_out, p))
+    S2 = np.zeros(n_out)
+    n_seg = (N - p + M - 1) // M
+    ck_theta = np.zeros((n_seg, p))
+    ck_P = np.zeros((n_seg, p, p))
+    ck_r = np.zeros(n_seg)
+
+    theta = np.zeros(p)
+    P = p0 * np.eye(p)
+    r = r0
+    for n in range(p, N):          # forward filter, checkpoint every M samples
+        j = n - p
+        if j % M == 0:
+            ck_theta[j // M] = theta
+            ck_P[j // M] = P
+            ck_r[j // M] = r
+        r = _kf_update(x, n, p, q, theta, P, r, alpha)
+        if j % stride == 0:
+            A[j // stride] = theta
+            S2[j // stride] = r
+    if not smooth:
+        return A, S2
+
+    # RTS backward pass, one checkpointed segment at a time (last segment first).
+    # Random walk => theta_pred[n+1] = theta_f[n], P_pred[n+1] = P_f[n] + qI.
+    I = np.eye(p)
+    buf_theta = np.zeros((M, p))
+    buf_P = np.zeros((M, p, p))
+    theta_s = np.zeros(p)
+    for s in range(n_seg - 1, -1, -1):
+        start = p + s * M
+        stop = min(start + M, N)
+        th = ck_theta[s].copy()
+        Pc = ck_P[s].copy()
+        rr = ck_r[s]
+        for n in range(start, stop):   # recompute this segment's filtered states
+            rr = _kf_update(x, n, p, q, th, Pc, rr, alpha)
+            buf_theta[n - start] = th
+            buf_P[n - start] = Pc
+        for n in range(stop - 1, start - 1, -1):
+            i = n - start
+            if n == N - 1:
+                theta_s = buf_theta[i].copy()
+            else:
+                C = np.linalg.solve(buf_P[i] + q * I, buf_P[i]).T   # P_f (P_f + qI)^-1
+                theta_s = buf_theta[i] + C @ (theta_s - buf_theta[i])
+            j = n - p
+            if j % stride == 0:
+                A[j // stride] = theta_s
+    return A, S2
+
+
+def tvar_kalman(x, p, q, r=None, fs=FS, out_dt=0.05, r_tau=1.0, p0=10.0, checkpoint=256, smooth=True):
+    """Random-walk-coefficient Kalman TVAR with checkpointed RTS smoothing.
+
+    `q` is the per-sample coefficient random-walk variance. `r` fixes the observation noise;
+    if None it is tracked as an EMA (time constant `r_tau` s) of squared prediction errors.
+    `checkpoint` is the RTS segment length in samples (memory vs recompute; results identical).
+    Returns (t_out (T,), A (T, p), sigma2 (T,)), times relative to the first sample.
+    """
+    x = np.ascontiguousarray(x, dtype=np.float64)
+    stride = _stride(fs, out_dt)
+    if r is None:
+        r0, alpha = 1.0, math.exp(-1.0 / (r_tau * fs))
+    else:
+        r0, alpha = float(r), 1.0
+    A, S2 = _kalman_kernel(x, p, q, p0, r0, alpha, stride, checkpoint, smooth)
+    return _out_times(len(A), p, stride, fs), A, S2
