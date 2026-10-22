@@ -30,8 +30,8 @@ class Trial:
     x: np.ndarray
     fs: float
     muscle: str
-    subject: int
-    trial: int
+    subject: int | None = None   # None for recordings outside sEMG_data/
+    trial: int | None = None
 
 
 def trials_for_muscle(muscle):
@@ -74,6 +74,32 @@ def load_trial(subject, trial, data_dir=DEFAULT_DATA_DIR):
     if abs(fs - FS) / FS > 0.01:
         raise ValueError(f"{path}: estimated fs {fs:.1f} Hz differs from {FS} Hz by >1%")
     return Trial(t=t, x=x, fs=fs, muscle=muscle, subject=subject, trial=trial)
+
+
+MYOWARE_MIN_FS = 1000.0   # below this MyoWare's 498 Hz low-pass aliases into the 20-450 Hz band
+MYOWARE_MAX_GAP_FRAC = 0.01
+
+
+def load_myoware(path, muscle):
+    """Load a MyoWare 2.0 + ESP32 recording: CSV `t_us,raw` (microsecond timestamp, ADC counts)."""
+    if muscle not in MUSCLE_TO_COLUMN:
+        raise KeyError(f"unknown muscle {muscle!r}; expected one of {MUSCLES}")
+    if pl.read_csv(path, n_rows=0).columns != ["t_us", "raw"]:
+        raise ValueError(f"{path}: expected header 't_us,raw'")
+    df = pl.read_csv(path).drop_nulls()
+    t_us = df["t_us"].to_numpy().astype(np.int64)
+    x = df["raw"].to_numpy().astype(float)
+    dt = np.diff(t_us)
+    if np.any(dt <= 0):
+        raise ValueError(f"{path}: t_us is not strictly increasing (clock wrap or merged files?)")
+    median_dt = np.median(dt)
+    fs = 1e6 / median_dt
+    if fs < MYOWARE_MIN_FS:
+        raise ValueError(f"{path}: estimated fs {fs:.1f} Hz is below {MYOWARE_MIN_FS:.0f} Hz")
+    gap_frac = np.mean(dt > 2 * median_dt)
+    if gap_frac > MYOWARE_MAX_GAP_FRAC:
+        raise ValueError(f"{path}: {gap_frac:.1%} of intervals are gaps > 2x median (dropped serial data?)")
+    return Trial(t=(t_us - t_us[0]) / 1e6, x=x, fs=fs, muscle=muscle)
 
 
 def extract_subject(subject, data_dir=DEFAULT_DATA_DIR):

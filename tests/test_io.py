@@ -3,7 +3,7 @@ import zipfile
 import numpy as np
 import pytest
 
-from emg.io import (DEFAULT_DATA_DIR, FS, MUSCLES, TRIAL_TO_MUSCLE, extract_subject,
+from emg.io import (DEFAULT_DATA_DIR, FS, MUSCLES, TRIAL_TO_MUSCLE, extract_subject, load_myoware,
                     load_trial, trials_for_muscle)
 
 R_HEADER = ["X [s]", "R BICEPS BRACHII: EMG 1 [V]", "X [s].1", "R DELTOID ANTERIOR: EMG 2 [V]",
@@ -110,3 +110,49 @@ def test_extract_subject_unzips_once(tmp_path):
 def test_extract_subject_missing_zip_raises(tmp_path):
     with pytest.raises(FileNotFoundError):
         extract_subject(4, data_dir=tmp_path)
+
+
+def _write_myoware(path, t_us, raw=None):
+    raw = np.arange(len(t_us)) % 4096 if raw is None else raw
+    path.write_text("t_us,raw\n" + "".join(f"{t},{r}\n" for t, r in zip(t_us, raw)))
+    return path
+
+
+def test_load_myoware_reads_counts_and_estimates_fs(tmp_path):
+    t_us = 5_000_000 + np.arange(4000) * 500           # 2 kHz, clock not starting at 0
+    tr = load_myoware(_write_myoware(tmp_path / "rec.csv", t_us), "R_BICEPS_BRACHII")
+    assert tr.fs == pytest.approx(2000.0)
+    assert tr.t[0] == 0.0 and tr.t[-1] == pytest.approx(3999 / 2000)
+    np.testing.assert_array_equal(tr.x, np.arange(4000) % 4096)
+    assert tr.muscle == "R_BICEPS_BRACHII"
+
+
+def test_load_myoware_rejects_low_fs(tmp_path):
+    path = _write_myoware(tmp_path / "rec.csv", np.arange(1000) * 2000)   # 500 Hz
+    with pytest.raises(ValueError, match="fs"):
+        load_myoware(path, "R_BICEPS_BRACHII")
+
+
+def test_load_myoware_rejects_dropped_samples(tmp_path):
+    t_us = np.arange(4000) * 500
+    t_us[2000:] += 500 * 100                            # one gap is fine...
+    load_myoware(_write_myoware(tmp_path / "ok.csv", t_us), "R_BICEPS_BRACHII")
+    gappy = np.cumsum(np.where(np.arange(4000) % 50 == 0, 1500, 500))   # 2% of intervals are 3x
+    with pytest.raises(ValueError, match="gaps"):
+        load_myoware(_write_myoware(tmp_path / "bad.csv", gappy), "R_BICEPS_BRACHII")
+
+
+def test_load_myoware_rejects_non_increasing_time(tmp_path):
+    t_us = np.arange(4000) * 500
+    t_us[100] = t_us[99]
+    with pytest.raises(ValueError, match="increasing"):
+        load_myoware(_write_myoware(tmp_path / "rec.csv", t_us), "R_BICEPS_BRACHII")
+
+
+def test_load_myoware_rejects_wrong_header_and_muscle(tmp_path):
+    path = tmp_path / "rec.csv"
+    path.write_text("time,value\n0,1\n")
+    with pytest.raises(ValueError, match="t_us,raw"):
+        load_myoware(path, "R_BICEPS_BRACHII")
+    with pytest.raises(KeyError):
+        load_myoware(_write_myoware(path, np.arange(10) * 500), "QUADRICEPS")
