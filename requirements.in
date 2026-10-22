@@ -1,0 +1,7 @@
+polars
+scipy
+numpy
+matplotlib
+numba
+pytest
+pyserial
