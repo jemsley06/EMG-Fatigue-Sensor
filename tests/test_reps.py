@@ -31,7 +31,7 @@ def test_envelope_rises_during_burst(reps):
     assert env[a:b].mean() > 5 * env[:a - int(0.5 * FS)].mean()
 
 
-# ---- detect_reps: these define the behaviour of the TODO in emg/reps.py
+# ---- detect_reps
 
 def test_detect_reps_finds_every_rep_near_true_bounds(reps):
     trial, bounds = reps
@@ -53,6 +53,11 @@ def test_detect_reps_merges_brief_dip():
 def test_detect_reps_does_not_depend_on_units():
     env = _burst_env([(2, 0), (1, 1), (1, 0), (1, 1), (1, 0), (1, 1), (2, 0)])
     np.testing.assert_array_equal(detect_reps(env, FS), detect_reps(1e-4 * env, FS))
+
+
+def test_detect_reps_finds_nothing_in_rest_only_recording():
+    noise = 0.05 * np.random.default_rng(0).normal(size=int(20 * FS))
+    assert len(detect_reps(envelope(noise, FS), FS)) == 0
 
 
 # ---- per-rep spectra (independent of detect_reps)

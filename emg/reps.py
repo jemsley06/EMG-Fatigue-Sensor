@@ -40,16 +40,24 @@ def _runs(mask):
     return np.column_stack([np.flatnonzero(d == 1), np.flatnonzero(d == -1)])
 
 
-def detect_reps(env, fs, min_rep_s=0.3, min_gap_s=0.2):
+def detect_reps(env, fs, min_rep_s=0.3, min_gap_s=0.2, frac=0.3, min_contrast=3.0):
     """(R, 2) [start, stop) sample indices of the contraction bursts in envelope `env`.
 
+    The threshold sits `frac` of the way from the rest floor (10th percentile) to the active level
+    (99th percentile, so spikes shorter than 1 % of the recording don't set it), which makes it
+    unit-free: the dataset is in volts (~1e-4), the MyoWare in ADC counts (~100s). If the active
+    level is under `min_contrast` x the floor there are no bursts, only noise, and no reps.
     A burst shorter than `min_rep_s` is not a rep (a twitch or a cable knock). Two bursts separated
-    by less than `min_gap_s` are one rep (the envelope dips mid-movement). The threshold must not
-    depend on units: the dataset is in volts (~1e-4) and the MyoWare in ADC counts (~100s).
+    by less than `min_gap_s` are one rep (the envelope dips mid-movement).
     """
-    # TODO(you): choose the activity threshold, build the boolean mask, then use _runs(mask),
-    # merge runs closer than min_gap_s and drop runs shorter than min_rep_s.
-    raise NotImplementedError
+    floor, active = np.percentile(env, [10, 99])
+    if active < min_contrast * floor:
+        return np.empty((0, 2), dtype=int)
+    runs = _runs(env > floor + frac * (active - floor))
+    if len(runs) > 1:
+        split = runs[1:, 0] - runs[:-1, 1] >= min_gap_s * fs
+        runs = np.column_stack([runs[np.r_[True, split], 0], runs[np.r_[split, True], 1]])
+    return runs[runs[:, 1] - runs[:, 0] >= min_rep_s * fs]
 
 
 def rep_spectrum(seg, fs, p):
