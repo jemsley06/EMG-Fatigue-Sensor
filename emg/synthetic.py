@@ -23,27 +23,30 @@ def ar2_coeffs(freq_hz, radius=0.9, fs=FS):
     return np.column_stack([-2 * radius * np.cos(w), np.full(w.size, radius ** 2)])
 
 
-def rep_trial(n_reps=12, rep_s=1.5, rest_s=1.5, f_start=150.0, f_end=100.0, lead_s=2.0,
-              rest_level=0.05, fs=FS, seed=0):
-    """Repetition-style trial: AR(2) bursts separated by low-level white noise (electrode floor).
+def rep_trial(n_reps=12, rep_s=1.5, conc_s=0.8, rest_s=1.5, f_start=150.0, f_end=100.0,
+              ecc_gain=0.4, ecc_shift_hz=40.0, lead_s=2.0, rest_level=0.05, fs=FS, seed=0):
+    """Curl-style trial: AR(2) bursts separated by low-level white noise (electrode floor).
 
-    The resonance is constant within a rep and falls linearly from f_start to f_end across reps.
-    Returns (trial, bounds) with bounds (n_reps, 2) the true [start, stop) of each rep in samples.
+    Each rep is a concentric phase (first `conc_s` s, gain 1, resonance f) then an eccentric phase
+    (gain `ecc_gain`, resonance f + `ecc_shift_hz`). f falls linearly from f_start to f_end across
+    reps. Returns (trial, bounds, conc_stop): bounds (n_reps, 2) the true [start, stop) of each rep
+    and conc_stop (n_reps,) the true end of each concentric phase, in samples.
     """
     period = rep_s + rest_s
     N = int(round((lead_s + n_reps * period) * fs))
     starts = np.round((lead_s + period * np.arange(n_reps)) * fs).astype(int)
     bounds = np.column_stack([starts, starts + int(round(rep_s * fs))])
+    conc_stop = starts + int(round(conc_s * fs))
     freq = np.full(N, f_start)
-    active = np.zeros(N, dtype=bool)
-    for (a, b), f in zip(bounds, np.linspace(f_start, f_end, n_reps)):
-        freq[a:b] = f
-        active[a:b] = True
+    gain = np.zeros(N)
+    for (a, b), c, f in zip(bounds, conc_stop, np.linspace(f_start, f_end, n_reps)):
+        freq[a:c], gain[a:c] = f, 1.0
+        freq[c:b], gain[c:b] = f + ecc_shift_hz, ecc_gain
     rng = np.random.default_rng(seed)
-    x = np.where(active, simulate_ar(ar2_coeffs(freq, fs=fs), rng), 0.0)
+    x = gain * simulate_ar(ar2_coeffs(freq, fs=fs), rng)
     x += rest_level * rng.normal(size=N)
     trial = Trial(t=np.arange(N) / fs, x=x, fs=fs, muscle="SYNTHETIC_REPS", subject=0, trial=0)
-    return trial, bounds
+    return trial, bounds, conc_stop
 
 
 def step_trial(f_before=150.0, f_after=80.0, seconds=60.0, step_at=30.0, fs=FS, seed=0):

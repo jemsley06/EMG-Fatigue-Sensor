@@ -3,7 +3,7 @@ import pytest
 
 from emg.io import FS
 from emg.metrics import mnf
-from emg.reps import _runs, detect_reps, envelope, run_reps
+from emg.reps import _runs, concentric_stop, detect_reps, envelope, run_reps
 from emg.synthetic import ar2_coeffs, rep_trial
 from emg.tvar import FREQ_GRID, ar_psd
 
@@ -25,7 +25,7 @@ def test_runs_finds_true_runs():
 
 
 def test_envelope_rises_during_burst(reps):
-    trial, bounds = reps
+    trial, bounds, conc = reps
     env = envelope(trial.x, trial.fs)
     a, b = bounds[0]
     assert env[a:b].mean() > 5 * env[:a - int(0.5 * FS)].mean()
@@ -34,7 +34,7 @@ def test_envelope_rises_during_burst(reps):
 # ---- detect_reps
 
 def test_detect_reps_finds_every_rep_near_true_bounds(reps):
-    trial, bounds = reps
+    trial, bounds, conc = reps
     found = detect_reps(envelope(trial.x, trial.fs), trial.fs)
     assert found.shape == bounds.shape
     assert np.abs(found - bounds).max() < 0.15 * FS
@@ -62,20 +62,35 @@ def test_detect_reps_finds_nothing_in_rest_only_recording():
 
 # ---- per-rep spectra (independent of detect_reps)
 
-def test_run_reps_tracks_falling_mnf_per_rep(reps):
-    trial, bounds = reps
+def test_concentric_stop_near_true_phase_end(reps):
+    trial, bounds, conc = reps
+    env = envelope(trial.x, trial.fs)
+    found = [concentric_stop(env, a, b) for a, b in bounds]
+    assert np.abs(np.array(found) - conc).max() < 0.15 * FS
+
+
+def test_run_reps_tracks_falling_concentric_mnf(reps):
+    trial, bounds, conc = reps
     table = run_reps(trial, segments=bounds)
     true = [mnf(ar_psd(ar2_coeffs(f)[0], 1.0, FS, FREQ_GRID), FREQ_GRID)
             for f in np.linspace(150.0, 100.0, len(bounds))]
     assert len(table.mnf) == len(bounds)
-    assert np.abs(table.mnf - true).max() < 8.0
-    assert np.polyfit(np.arange(len(bounds)), table.mnf, 1)[0] < 0
+    assert np.abs(table.mnf - true).max() < 8.0      # eccentric (+40 Hz) would bias this up
+    assert table.slope() < 0
     assert table.relative()[-1] < 0.95
+    np.testing.assert_allclose(table.conc_duration, 0.8, atol=0.15)
+    np.testing.assert_allclose(table.duration, 1.5, atol=0.01)
 
 
 def test_run_reps_rms_is_in_input_units(reps):
-    trial, bounds = reps
+    trial, bounds, conc = reps
     small = type(trial)(t=trial.t, x=1e-4 * trial.x, fs=trial.fs, muscle=trial.muscle)
     a, b = run_reps(trial, segments=bounds), run_reps(small, segments=bounds)
     np.testing.assert_allclose(b.rms, 1e-4 * a.rms, rtol=1e-6)
     np.testing.assert_allclose(b.mnf, a.mnf, rtol=1e-6)    # spectrum ignores scale
+
+
+def test_run_reps_marks_too_short_phase_as_nan(reps):
+    trial, bounds, conc = reps
+    table = run_reps(trial, segments=bounds, p=200)          # needs 2000 samples per phase
+    assert np.isnan(table.mnf).all()
